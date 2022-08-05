@@ -102,7 +102,7 @@ class GazeTracker:
 		self.board_height = 600
 		self.board = np.zeros((self.board_height, self.board_width, 3), np.uint8)
 
-		self.board_eyes_width = 100
+		self.board_eyes_width = 200
 
 	def load_img (self, img):
 		self.img = img
@@ -149,18 +149,18 @@ class GazeTracker:
 		x = (self.left_eye.get_x(left_eye_thr) )#+ self.right_eye.get_x(right_eye_thr)) / 2
 		y = self.left_eye.get_y()
 
-		# left_eye_thr = cv2.resize(left_eye_thr, (int(self.board_eyes_width),
-		# 										 int(left_eye_thr.shape[0] * self.board_eyes_width / left_eye_thr.shape[1])))
-		# right_eye_thr = cv2.resize(right_eye_thr, (int(self.board_eyes_width),
-		# 										 int(right_eye_thr.shape[0] * self.board_eyes_width / right_eye_thr.shape[1])))
+		left_eye_thr = cv2.resize(left_eye_thr, (int(self.board_eyes_width),
+												 int(left_eye_thr.shape[0] * self.board_eyes_width / left_eye_thr.shape[1])), cv2.INTER_NEAREST)
+		right_eye_thr = cv2.resize(right_eye_thr, (int(self.board_eyes_width),
+												 int(right_eye_thr.shape[0] * self.board_eyes_width / right_eye_thr.shape[1])))
 
-		# self.board[0:left_eye_thr.shape[0], 
-		# 			(self.board_width - left_eye_thr.shape[1]):self.board_width] = cv2.cvtColor(left_eye_thr, cv2.COLOR_GRAY2BGR)
-		# self.board[left_eye_thr.shape[0]:left_eye_thr.shape[0] + right_eye_thr.shape[0], 
-		# 			(self.board_width - right_eye_thr.shape[1]):self.board_width] = cv2.cvtColor(right_eye_thr, cv2.COLOR_GRAY2BGR)
+		self.board[0:left_eye_thr.shape[0], 
+					(self.board_width - left_eye_thr.shape[1]):self.board_width] = cv2.cvtColor(left_eye_thr, cv2.COLOR_GRAY2BGR)
+		self.board[left_eye_thr.shape[0]:left_eye_thr.shape[0] + right_eye_thr.shape[0], 
+					(self.board_width - right_eye_thr.shape[1]):self.board_width] = cv2.cvtColor(right_eye_thr, cv2.COLOR_GRAY2BGR)
 
-		cv2.imshow("left_eye", left_eye_thr)
-		cv2.imshow("right_eye", right_eye_thr)
+		# cv2.imshow("left_eye", left_eye_thr)
+		# cv2.imshow("right_eye", right_eye_thr)
 
 		cv2.putText(self.board, 'x = ' + str(x),
 				 (0, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
@@ -210,7 +210,7 @@ cv2.namedWindow("Board")
 cv2.createTrackbar("Threshold", "Board", 0, 255, nothing)
 cv2.setTrackbarPos("Threshold", "Board", 70)
 
-gaze_arr_size = 1
+gaze_arr_size = 10
 gaze_arr = np.zeros((gaze_arr_size, 2))
 gaze_arr_index = 0
 
@@ -241,10 +241,10 @@ while True:
 			blink += [gaze[-1]]
 			blink_t += [time.time() - start]
 		else:
-			gaze += [gaze_tracker.get_gaze_threshold()]
 			gaze_t += [time.time() - start]
-			gaze_arr[gaze_arr_index, :] = np.array([gaze[-1]])
+			gaze_arr[gaze_arr_index, :] = np.array([gaze_tracker.get_gaze_threshold()])
 			gaze_arr_index = (gaze_arr_index + 1) % gaze_arr_size
+			gaze += [(np.mean(gaze_arr[:, 0]), np.mean(gaze_arr[:, 1]))]
 
 		gaze_tracker.draw_face_rect()
 		# gaze_tracker.draw_polylines()
@@ -267,6 +267,6 @@ while True:
 cap.release
 cv2.destroyAllWindows()
 
-plt.plot(gaze_t, gaze)
-plt.plot(blink_t, blink, 'o')
-plt.show()
+# plt.plot(gaze_t, gaze)
+# plt.plot(blink_t, blink, 'o')
+# plt.show()
