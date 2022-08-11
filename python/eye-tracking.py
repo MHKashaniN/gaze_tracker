@@ -267,6 +267,6 @@ while True:
 cap.release
 cv2.destroyAllWindows()
 
-# plt.plot(gaze_t, gaze)
-# plt.plot(blink_t, blink, 'o')
-# plt.show()
+plt.plot(gaze_t, gaze)
+plt.plot(blink_t, blink, 'o')
+plt.show()

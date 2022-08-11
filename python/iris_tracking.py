@@ -45,23 +45,23 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
             #     cv2.circle(img, (int(p.x * img_w), int(p.y * img_h)), 1, (255, 0, 255), cv2.FILLED) 
 
             # show iris circle
-            # (l_x, l_y), l_r = cv2.minEnclosingCircle(mesh_points[LEFT_IRIS])
-            # (r_x, r_y), r_r = cv2.minEnclosingCircle(mesh_points[RIGHT_IRIS])
-            # (l_x, l_y), l_r = (int(l_x), int(l_y)), int(l_r)
-            # (r_x, r_y), r_r = (int(r_x), int(r_y)), int(r_r)
-            # cv2.circle(img, (l_x, l_y), l_r, (0, 255, 0), 1)
-            # cv2.circle(img, (r_x, r_y), r_r, (0, 255, 0), 1)
+            (l_x, l_y), l_r = cv2.minEnclosingCircle(mesh_points[LEFT_IRIS])
+            (r_x, r_y), r_r = cv2.minEnclosingCircle(mesh_points[RIGHT_IRIS])
+            (l_x, l_y), l_r = (int(l_x), int(l_y)), int(l_r)
+            (r_x, r_y), r_r = (int(r_x), int(r_y)), int(r_r)
+            cv2.circle(img, (l_x, l_y), l_r, (0, 255, 0), 1)
+            cv2.circle(img, (r_x, r_y), r_r, (0, 255, 0), 1)
 
             # show middle points
-            # cv2.circle(img, mesh_points[LEFT_CENTER], 2, (255, 0, 255), cv2.FILLED)
-            # cv2.circle(img, mesh_points[RIGHT_CENTER], 2, (255, 0, 255), cv2.FILLED)
+            cv2.circle(img, mesh_points[LEFT_CENTER], 2, (255, 0, 255), cv2.FILLED)
+            cv2.circle(img, mesh_points[RIGHT_CENTER], 2, (255, 0, 255), cv2.FILLED)
 
             # show eyes polygons
-            # cv2.polylines(img, [mesh_points[LEFT_EYE]], True, (0, 0, 255), 1)
-            # cv2.polylines(img, [mesh_points[RIGHT_EYE]], True, (0, 0, 255), 1)
+            cv2.polylines(img, [mesh_points[LEFT_EYE]], True, (0, 0, 255), 1)
+            cv2.polylines(img, [mesh_points[RIGHT_EYE]], True, (0, 0, 255), 1)
 
 
-        cv2.putText(img, str(int(duration * 1000)) + ' ms, ' + str(int(1 / duration)) + ' FPS',
+        cv2.putText(img, str(int(duration * 1000)) + ' ms, ' + f"{(1 / duration):.1f}" + ' FPS',
                      (0, 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         fps += [int(1 / duration)]
         cv2.imshow("Cam", img)
