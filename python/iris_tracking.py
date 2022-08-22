@@ -3,8 +3,37 @@ import time
 import numpy as np
 import mediapipe as mp
 import matplotlib.pyplot as plt
-from math import hypot, inf, cos, atan, sin, tan, asin, pi, sqrt
+import scipy.io
+from math import hypot, inf, tan, asin
 from face_geometry import get_metric_landmarks, PCF, procrustes_landmark_basis
+
+
+class Filter:
+    def __init__(self, Num, Den):
+        self.Num = Num
+        self.Den = Den
+        if len(Num) > len(Den):
+            self.Den += [0] * (len(Num) - len(Den))
+        elif len(Num) < len(Den):
+            self.Num += [0] * (len(Den) - len(Num))
+        self.order = len(Den)
+        self.input_buffer = [0] * self.order
+        self.output_buffer = [0] * self.order
+        self.index = 0
+
+    def add_input(self, x):
+        self.index = (self.index + 1) % self.order
+        self.input_buffer[self.index] = x
+        y = 0
+        for i in range(self.order):
+            j = (self.index - i) % self.order
+            y += self.Num[i] * self.input_buffer[j]
+            if i != 0:
+                y -= self.Den[i] * self.output_buffer[j]
+        self.output_buffer[self.index] = y
+
+    def output(self):
+        return self.output_buffer[self.index]
 
 def length(p1, p2):
     return hypot(p1[0] - p2[0], p1[1] - p2[1])
@@ -156,8 +185,32 @@ def get_mean_position(points_num):
 
             if not is_blinked(mesh_points):
                 left_iris_x, right_iris_x, left_iris_y, right_iris_y = iris_positions(mesh_points)
-                data += [[left_iris_x, right_iris_x, left_iris_y, right_iris_y]]
+                l_ratio, r_ratio = eyes_ratio(mesh_points)
+                data += [[left_iris_x, right_iris_x, left_iris_y, right_iris_y, l_ratio, r_ratio]]
                 t += [left_iris_y]
+
+        if cv2.waitKey(1) == 32:
+            data = np.array(data)
+            return t, np.mean(data[-points_num:, :], 0)
+
+def get_mean_ratio(points_num):
+    data = []
+    t = []
+    while True:
+        ret, img = cap.read()
+        img_h, img_w = img.shape[:2]
+        img = cv2.flip(img, 1)
+        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb_img)
+
+        if results.multi_face_landmarks:
+            mesh_points = np.array([[int(p.x * img_w), int(p.y * img_h)] for p in results.multi_face_landmarks[0].landmark])
+            mesh_points_3d = np.array([(p.x, p.y, p.z) for p in results.multi_face_landmarks[0].landmark])[:468].T
+
+
+            l_ratio, r_ratio = eyes_ratio(mesh_points)
+            data += [[l_ratio, r_ratio]]
+            t += [l_ratio]
 
         cv2.imshow('cam', img)
 
@@ -175,18 +228,24 @@ def callibration():
 
     cv2.circle(cal_board, (BOARD_WIDTH // 2, BOARD_HEIGHT // 2), 15, (255, 0, 255), cv2.FILLED)
     cv2.imshow("Board", cal_board)
-    returned_t, returned_reasult = get_mean_position(POINTS_NUM)
+    returned_t, returned_result = get_mean_position(POINTS_NUM)
     t += returned_t
-    result += [returned_reasult]
+    result += [returned_result]
 
     for j in range(3):
         for i in range(4):
             cal_board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 3), np.uint8)
             cv2.circle(cal_board, (int(i * BOARD_WIDTH / 3), int(j * BOARD_HEIGHT / 2)), 15, (255, 0, 255), cv2.FILLED)
             cv2.imshow("Board", cal_board)
-            returned_t, returned_reasult = get_mean_position(POINTS_NUM)
+            returned_t, returned_result = get_mean_position(POINTS_NUM)
             t += returned_t
-            result += [returned_reasult]
+            result += [returned_result]
+
+    cal_board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 3), np.uint8)
+    cv2.putText(cal_board, 'Close Your Eyes and press space', (0, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
+    cv2.imshow("Board", cal_board)
+    returned_t, returned_result = get_mean_ratio(POINTS_NUM)
+    result += [returned_result]
 
     plt.figure('X')
     plt.plot(t)
@@ -255,24 +314,42 @@ LEFT_CENTER = 468
 L_BLINK_RATIO = 0.1
 R_BLINK_RATIO = 0.15
 
-BUFFER_LENGTH = 10
+# FILTER_NUM = [1]
+# FILTER_DEN = [1]
+
+# FILTER_NUM = [0.0011422, 0.0051294, 0.008849, 0.011549, 0.012542, 0.011337, 0.0077619, 0.0020454, -0.0051582, -0.012812, -0.019604, -0.024115, -0.02502, -0.021293, -0.012392, 0.0016148, 0.019999, 0.041412, 0.064017, 0.085696, 0.1043, 0.11791, 0.1251, 0.1251, 0.11791, 0.1043, 0.085696, 0.064017, 0.041412, 0.019999, 0.0016148, -0.012392, -0.021293, -0.02502, -0.024115, -0.019604, -0.012812, -0.0051582, 0.0020454, 0.0077619, 0.011337, 0.012542, 0.011549, 0.008849, 0.0051294, 0.0011422]
+# FILTER_DEN = [1] + [0] * (len(FILTER_NUM) - 1)
+
+# FILTER_NUM = [0.1] * 10
+# FILTER_DEN = [1] + [0] * 9
+
+# FILTER_NUM = [0.0084, 0.0252, 0.0252, 0.0084]
+# FILTER_DEN = [1.0000, -2.0727, 1.5292, -0.3892]
+
+FILTER_NUM = [0.00084, 0.00336, 0.00588, 0.00672, 0.00672, 0.00672, 0.00672, 0.00672, 0.00672, 0.00672, 0.00588, 0.00336, 0.00084]
+FILTER_DEN = [1.0000, -2.0727, 1.5292, -0.3892] + [0]*9
+
+FILTER_ORDER = max(len(FILTER_NUM), len(FILTER_DEN))
+
+test_filter = Filter(FILTER_NUM, FILTER_DEN)
 
 BOARD_WIDTH = 1200
 BOARD_HEIGHT = 600
 
-points_idx =  [33,263,61,291,199] # [k for k in range(0,468)] 
-points_idx = points_idx + [key for (key,val) in procrustes_landmark_basis]
+points_idx = [33, 263, 61, 291, 199]  # [k for k in range(0,468)]
+points_idx = points_idx + [key for (key, val) in procrustes_landmark_basis]
 points_idx = list(set(points_idx))
 points_idx.sort()
 
 fps = []
-right_gaze_arr = [] # (t, x, y)
+right_gaze_arr = []  # (t, x, y)
 left_gaze_arr = []
-right_blink_arr = [] # (t, x0, y0)
+right_blink_arr = []  # (t, x0, y0)
 left_blink_arr = []
+left_filter = []
 
-right_gaze_buffer = np.zeros((BUFFER_LENGTH, 2)) # (x, y)
-left_gaze_buffer = np.zeros((BUFFER_LENGTH, 2))
+right_gaze_buffer = np.zeros((FILTER_ORDER, 2))  # (x, y)
+left_gaze_buffer = np.zeros((FILTER_ORDER, 2))
 buffer_index = 0
 
 left_gaze = [0, 0]
@@ -349,13 +426,28 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
                     # filter
                     left_gaze_buffer[buffer_index] = [left_iris_x, left_iris_y]
                     right_gaze_buffer[buffer_index] = [right_iris_x, right_iris_y]
-                    buffer_index = (buffer_index + 1) % BUFFER_LENGTH
+                    test_filter.add_input(left_iris_x)
 
-                    left_gaze = np.mean(left_gaze_buffer, 0)
-                    right_gaze = np.mean(right_gaze_buffer, 0)
+
+                    left_gaze = [0, 0]
+                    right_gaze = [0, 0]
+                    for i in range(FILTER_ORDER):
+                        j = (buffer_index - i) % FILTER_ORDER
+                        left_gaze[0] += FILTER_NUM[i] * left_gaze_buffer[j][0]
+                        left_gaze[1] += FILTER_NUM[i] * left_gaze_buffer[j][1]
+                        right_gaze[0] += FILTER_NUM[i] * right_gaze_buffer[j][0]
+                        right_gaze[1] += FILTER_NUM[i] * right_gaze_buffer[j][1]
+                        if len(left_gaze_arr) > i and i != FILTER_ORDER-1:
+                            left_gaze[0] -= FILTER_DEN[i+1] * left_gaze_arr[-i-1][1]
+                            left_gaze[1] -= FILTER_DEN[i+1] * left_gaze_arr[-i-1][2]
+                            right_gaze[0] -= FILTER_DEN[i+1] * right_gaze_arr[-i-1][1]
+                            right_gaze[1] -= FILTER_DEN[i+1] * right_gaze_arr[-i-1][2]
 
                     left_gaze_arr += [[time.time() - start, left_gaze[0], left_gaze[1]]]
+                    left_filter += [[time.time() - start, test_filter.output()]]
                     right_gaze_arr += [[time.time() - start, right_gaze[0], right_gaze[1]]]
+
+                    buffer_index = (buffer_index + 1) % FILTER_ORDER
 
                 left_gaze_x = int(-14000 * tan(asin(left_gaze[0] - 0.56)) + BOARD_WIDTH/2)
                 right_gaze_x = int(14000 * tan(asin(right_gaze[0] - 0.56)) + BOARD_WIDTH/2)
@@ -458,29 +550,35 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
 cap.release
 cv2.destroyAllWindows()
 
-# left_gaze_arr = np.array(left_gaze_arr)
-# left_blink_arr = np.array(left_blink_arr)
-# right_gaze_arr = np.array(right_gaze_arr)
-# right_blink_arr = np.array(right_blink_arr)
+left_gaze_arr = np.array(left_gaze_arr)
+left_blink_arr = np.array(left_blink_arr)
+right_gaze_arr = np.array(right_gaze_arr)
+right_blink_arr = np.array(right_blink_arr)
+left_filter = np.array(left_filter)
 
-# plt.figure("x")
-# plt.plot(left_gaze_arr[:, 0], left_gaze_arr[:, 1])
-# plt.plot(right_gaze_arr[:, 0], right_gaze_arr[:, 1])
-# if left_blink_arr.size != 0:
-#     plt.plot(left_blink_arr[:, 0], left_blink_arr[:, 1], 'o')
-# if right_blink_arr.size != 0:
-#     plt.plot(right_blink_arr[:, 0], right_blink_arr[:, 1], 'o')
-# plt.legend(['left', 'right'])
-# plt.figure("y")
-# plt.plot(left_gaze_arr[:, 0], left_gaze_arr[:, 2])
-# plt.plot(right_gaze_arr[:, 0], right_gaze_arr[:, 2])
-# if left_blink_arr.size != 0:
-#     plt.plot(left_blink_arr[:, 0], left_blink_arr[:, 2], 'o')
-# if right_blink_arr.size != 0:
-#     plt.plot(right_blink_arr[:, 0], right_blink_arr[:, 2], 'o')
-# plt.legend(['left', 'right'])
+# scipy.io.savemat('test.mat', {'data': left_gaze_arr})
 
-# plt.figure("FPS")
+plt.figure()
+plt.title("x")
+plt.plot(left_gaze_arr[:, 0], left_gaze_arr[:, 1])
+plt.plot(right_gaze_arr[:, 0], right_gaze_arr[:, 1])
+if left_blink_arr.size != 0:
+    plt.plot(left_blink_arr[:, 0], left_blink_arr[:, 1], 'o')
+if right_blink_arr.size != 0:
+    plt.plot(right_blink_arr[:, 0], right_blink_arr[:, 1], 'o')
+plt.legend(['left', 'right'])
+plt.figure()
+plt.title("y")
+plt.plot(left_gaze_arr[:, 0], left_gaze_arr[:, 2])
+plt.plot(right_gaze_arr[:, 0], right_gaze_arr[:, 2])
+if left_blink_arr.size != 0:
+    plt.plot(left_blink_arr[:, 0], left_blink_arr[:, 2], 'o')
+if right_blink_arr.size != 0:
+    plt.plot(right_blink_arr[:, 0], right_blink_arr[:, 2], 'o')
+plt.legend(['left', 'right'])
+
+# plt.figure()
+# plt.title("FPS")
 # plt.plot(fps)
 
-# plt.show()
+plt.show()
