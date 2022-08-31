@@ -4,8 +4,9 @@ import numpy as np
 import mediapipe as mp
 import matplotlib.pyplot as plt
 import scipy.io
-from math import hypot, inf, tan, asin
+from math import hypot, inf, tan, asin, pi, sin, cos
 from face_geometry import get_metric_landmarks, PCF, procrustes_landmark_basis
+from mpl_toolkits.mplot3d import Axes3D
 
 
 class Filter:
@@ -20,20 +21,61 @@ class Filter:
         self.input_buffer = [0] * self.order
         self.output_buffer = [0] * self.order
         self.index = 0
+        self.first_input = True
 
     def add_input(self, x):
-        self.index = (self.index + 1) % self.order
-        self.input_buffer[self.index] = x
-        y = 0
-        for i in range(self.order):
-            j = (self.index - i) % self.order
-            y += self.Num[i] * self.input_buffer[j]
-            if i != 0:
-                y -= self.Den[i] * self.output_buffer[j]
-        self.output_buffer[self.index] = y
+        if self.first_input:
+            self.input_buffer = [x] * self.order
+            self.output_buffer = [x] * self.order
+            self.first_input = False
+        else:
+            self.index = (self.index + 1) % self.order
+            self.input_buffer[self.index] = x
+            y = 0
+            for i in range(self.order):
+                j = (self.index - i) % self.order
+                y += self.Num[i] * self.input_buffer[j]
+                if i != 0:
+                    y -= self.Den[i] * self.output_buffer[j]
+            self.output_buffer[self.index] = y
 
     def output(self):
         return self.output_buffer[self.index]
+
+
+class GazeCalculator:
+    def __init__(self):
+        self.right_gaze_coeffs = [14000, -7240, -14000, 4640]
+        self.left_gaze_coeffs = [-14000, 8440, -14000, 4640]
+
+        self.L_BLINK_RATIO = 0.1
+        self.R_BLINK_RATIO = 0.15
+
+        self.position_correct = [0, 0]
+
+    def position2gaze(self, lix, liy, rix, riy, show=False, _board=None):
+        # left_gaze_x = int(-14000 * tan(asin(left_x_filter.output() - 0.56)) + BOARD_WIDTH / 2)
+        # right_gaze_x = int(14000 * tan(asin(right_x_filter.output() - 0.56)) + BOARD_WIDTH / 2)
+        # left_gaze_y = int(-14000 * tan(asin(left_y_filter.output() - 0.31)) + BOARD_HEIGHT / 2)
+        # right_gaze_y = int(-14000 * tan(asin(right_y_filter.output() - 0.31)) + BOARD_HEIGHT / 2)
+
+        x_l = self.left_gaze_coeffs[0] * lix + self.left_gaze_coeffs[1]
+        x_r = self.right_gaze_coeffs[0] * rix + self.right_gaze_coeffs[1]
+        y_l = self.left_gaze_coeffs[2] * liy + self.left_gaze_coeffs[3]
+        y_r = self.right_gaze_coeffs[2] * riy + self.right_gaze_coeffs[3]
+
+        if (show):
+            cv2.circle(_board, (int(x_l), int(y_l)), 10, (0, 255, 0), 2)
+            cv2.circle(_board, (int((x_l + x_r)/2), int((y_l + y_r)/2)), 10, (255, 255, 255), 2)
+            cv2.circle(_board, (int(x_r), int(y_r)), 10, (0, 0, 255), 2)
+
+        return int((x_l + x_r)/2), int((y_l + y_r)/2)
+
+    def head_position(self, p, o):
+        return p[0] - self.position_correct[0] * o[2], p[1] - self.position_correct[1] * o[1]
+
+
+
 
 def length(p1, p2):
     return hypot(p1[0] - p2[0], p1[1] - p2[1])
@@ -63,12 +105,19 @@ def signed_dist(line_start_point, point, line_end_point):
     return cross_product_z/vect2_length
 
 
+def cv2cross(_img, center, radius, color, thikness, angle=0.0):
+    cv2.line(_img, (int(center[0] + radius * cos(3*pi/4 + angle)), int(center[1] + radius * sin(3*pi/4 + angle))),
+                    (int(center[0] + radius * cos(-pi/4 + angle)), int(center[1] + radius * sin(-pi/4 + angle))), color, thikness)
+    cv2.line(_img, (int(center[0] + radius * cos(pi/4 + angle)), int(center[1] + radius * sin(pi/4 + angle))),
+                    (int(center[0] + radius * cos(5*pi/4 + angle)), int(center[1] + radius * sin(5*pi/4 + angle))), color, thikness)
+
+
 def get_head_orientation(rvec, tvec):
     rmat = cv2.Rodrigues(rvec)[0]  
-    P = np.hstack((rmat,tvec)) # projection matrix
+    P = np.hstack((rmat, tvec))  # projection matrix
     
     # find euler angles 
-    euler_angles =  cv2.decomposeProjectionMatrix(P)[6]
+    euler_angles = cv2.decomposeProjectionMatrix(P)[6]
     pitch = -euler_angles.item(0) 
     yaw = -euler_angles.item(1) 
     roll = euler_angles.item(2) 
@@ -82,7 +131,9 @@ def get_head_orientation(rvec, tvec):
     t = '{y},{p},{r}'.format(y=round(yaw),
                              p=round(pitch),
                              r=round(roll)) 
-    return round(roll), round(pitch), round(yaw)
+    # return round(roll), round(pitch), round(yaw)
+    return roll, pitch, yaw
+
 
 def eyes_ratio(_mesh_points):
     l_h = length(_mesh_points[LEFT_EYE[0]], _mesh_points[LEFT_EYE[8]])
@@ -124,13 +175,13 @@ def iris_positions(_mesh_points):
 
 
     # calculate y coordinates based on eye ratio
-    l_ratio, r_ratio = eyes_ratio(_mesh_points)
-    left_iris_y = l_ratio
-    right_iris_y = r_ratio
+    # l_ratio, r_ratio = eyes_ratio(_mesh_points)
+    # left_iris_y = l_ratio
+    # right_iris_y = r_ratio
 
     # calculate y coordinates based on head horizontal line
-    # left_iris_y = signed_dist(_mesh_points[RIGHT_EYE[0]], left_iris_center, _mesh_points[LEFT_EYE[0]]) / l_h
-    # right_iris_y = signed_dist(_mesh_points[RIGHT_EYE[0]], right_iris_center, _mesh_points[LEFT_EYE[0]]) / r_h
+    left_iris_y = signed_dist(_mesh_points[RIGHT_EYE[0]], left_iris_center, _mesh_points[LEFT_EYE[0]]) / l_h
+    right_iris_y = signed_dist(_mesh_points[RIGHT_EYE[0]], right_iris_center, _mesh_points[LEFT_EYE[0]]) / r_h
 
 
     # show axis and coordinates based on eye horizontal line
@@ -163,15 +214,22 @@ def iris_positions(_mesh_points):
 
     return left_iris_x, right_iris_x, left_iris_y, right_iris_y
 
-def is_blinked(_mesh_points):
+def is_blinked(_mesh_points, _gc):
     l_ratio, r_ratio = eyes_ratio(_mesh_points)
-    right_blink = r_ratio < R_BLINK_RATIO
-    left_blink = l_ratio < L_BLINK_RATIO
+    right_blink = r_ratio < _gc.R_BLINK_RATIO
+    left_blink = l_ratio < _gc.L_BLINK_RATIO
     return left_blink or right_blink
 
 def get_mean_position(points_num):
     data = []
     t = []
+    _FILTER_NUM = [0.1] * 10
+    _FILTER_DEN = [1]
+    lix_filter = Filter(_FILTER_NUM, _FILTER_DEN)
+    liy_filter = Filter(_FILTER_NUM, _FILTER_DEN)
+    rix_filter = Filter(_FILTER_NUM, _FILTER_DEN)
+    riy_filter = Filter(_FILTER_NUM, _FILTER_DEN)
+
     while True:
         ret, img = cap.read()
         img_h, img_w = img.shape[:2]
@@ -183,11 +241,14 @@ def get_mean_position(points_num):
             mesh_points = np.array([[int(p.x * img_w), int(p.y * img_h)] for p in results.multi_face_landmarks[0].landmark])
             mesh_points_3d = np.array([(p.x, p.y, p.z) for p in results.multi_face_landmarks[0].landmark])[:468].T
 
-            if not is_blinked(mesh_points):
-                left_iris_x, right_iris_x, left_iris_y, right_iris_y = iris_positions(mesh_points)
-                l_ratio, r_ratio = eyes_ratio(mesh_points)
-                data += [[left_iris_x, right_iris_x, left_iris_y, right_iris_y, l_ratio, r_ratio]]
-                t += [left_iris_y]
+            left_iris_x, right_iris_x, left_iris_y, right_iris_y = iris_positions(mesh_points)
+            lix_filter.add_input(left_iris_x)
+            liy_filter.add_input(left_iris_y)
+            rix_filter.add_input(right_iris_x)
+            riy_filter.add_input(right_iris_y)
+            l_ratio, r_ratio = eyes_ratio(mesh_points)
+            data += [[lix_filter.output(), rix_filter.output(), liy_filter.output(), riy_filter.output(), l_ratio, r_ratio]]
+            t += [lix_filter.output()]
 
         if cv2.waitKey(1) == 32:
             data = np.array(data)
@@ -209,18 +270,18 @@ def get_mean_ratio(points_num):
 
 
             l_ratio, r_ratio = eyes_ratio(mesh_points)
-            data += [[l_ratio, r_ratio]]
+            data += [4*[0] + [l_ratio, r_ratio]]
             t += [l_ratio]
-
-        cv2.imshow('cam', img)
 
         if cv2.waitKey(1) == 32:
             data = np.array(data)
             return t, np.mean(data[-points_num:, :], 0)
 
-def callibration():
+def callibration(_gc):
     t = []
+    t_stops = []
     POINTS_NUM = 20
+    GRID = [3, 4]
     result = []
     cal_board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 3), np.uint8)
     cv2.imshow("Board", cal_board)
@@ -230,15 +291,17 @@ def callibration():
     cv2.imshow("Board", cal_board)
     returned_t, returned_result = get_mean_position(POINTS_NUM)
     t += returned_t
+    t_stops += [len(t) - 1]
     result += [returned_result]
 
-    for j in range(3):
-        for i in range(4):
+    for j in range(GRID[0]):
+        for i in range(GRID[1]):
             cal_board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 3), np.uint8)
-            cv2.circle(cal_board, (int(i * BOARD_WIDTH / 3), int(j * BOARD_HEIGHT / 2)), 15, (255, 0, 255), cv2.FILLED)
+            cv2.circle(cal_board, (int(i * BOARD_WIDTH / (GRID[1] - 1)), int(j * BOARD_HEIGHT / (GRID[0] - 1))), 15, (255, 0, 255), cv2.FILLED)
             cv2.imshow("Board", cal_board)
             returned_t, returned_result = get_mean_position(POINTS_NUM)
             t += returned_t
+            t_stops += [len(t) - 1]
             result += [returned_result]
 
     cal_board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 3), np.uint8)
@@ -247,36 +310,64 @@ def callibration():
     returned_t, returned_result = get_mean_ratio(POINTS_NUM)
     result += [returned_result]
 
-    plt.figure('X')
-    plt.plot(t)
+    POINTS = GRID[0]*GRID[1] + 1
+    _gc.L_BLINK_RATIO = (3*result[POINTS][4] + min(np.array(result)[:POINTS, 4]))/4
+    _gc.R_BLINK_RATIO = (3*result[POINTS][5] + min(np.array(result)[:POINTS, 5]))/4
+
+    Y_x = np.array([BOARD_WIDTH/2] + list(np.array(list(range(GRID[1])) * GRID[0]) * BOARD_WIDTH / (GRID[1] - 1)))
+    Y_y = np.array([BOARD_HEIGHT/2] + list(np.reshape(np.reshape(np.array(list(range(GRID[0])) * GRID[1]), (GRID[1], GRID[0])).T, -1) * BOARD_HEIGHT / (GRID[0] - 1)))
+
+    X = np.concatenate((np.array([[1] * POINTS]).T, np.array([np.array(result)[:POINTS, 0]]).T), axis=1)
+    coeffs_lx = np.matmul(np.linalg.pinv(X), Y_x)
+    X = np.concatenate((np.array([[1] * POINTS]).T, np.array([np.array(result)[:POINTS, 1]]).T), axis=1)
+    coeffs_rx = np.matmul(np.linalg.pinv(X), Y_x)
+    X = np.concatenate((np.array([[1] * POINTS]).T, np.array([np.array(result)[:POINTS, 2]]).T), axis=1)
+    coeffs_ly = np.matmul(np.linalg.pinv(X), Y_y)
+    X = np.concatenate((np.array([[1] * POINTS]).T, np.array([np.array(result)[:POINTS, 3]]).T), axis=1)
+    coeffs_ry = np.matmul(np.linalg.pinv(X), Y_y)
+
+    _gc.left_gaze_coeffs = [coeffs_lx[1], coeffs_lx[0], coeffs_ly[1], coeffs_ly[0]]
+    _gc.right_gaze_coeffs = [coeffs_rx[1], coeffs_rx[0], coeffs_ry[1], coeffs_ry[0]]
+
+    plt.figure()
+    plt.title('X')
+    plt.plot(t, 'b')
+    plt.plot(t_stops, np.array(t)[t_stops], 'kx')
+    for k in range(POINTS):
+        plt.plot(range((t_stops[k] - POINTS_NUM + 1), t_stops[k] + 1), [result[k][0]] * POINTS_NUM, 'r')
     plt.show()
 
-    plt.figure('left iris x callibration')
-    plt.plot(np.array(range(4)) * BOARD_WIDTH / 3, np.array(result)[1:5, 0])
-    plt.plot(np.array(range(4)) * BOARD_WIDTH / 3, np.array(result)[5:9, 0])
-    plt.plot(np.array(range(4)) * BOARD_WIDTH / 3, np.array(result)[9:13, 0])
-    plt.legend(['y = 0', 'y = ' + str(BOARD_HEIGHT/2), 'y = ' + str(BOARD_HEIGHT)])
+    plt.figure()
+    plt.title('left iris x callibration')
+    for k in range(GRID[0]):
+        plt.plot(np.array(range(GRID[1])) * BOARD_WIDTH / (GRID[1] - 1), np.array(result)[(1 + k * GRID[1]):(1 + (k+1)*GRID[1]), 0])
+    # plt.legend(['y = 0', 'y = ' + str(BOARD_HEIGHT/2), 'y = ' + str(BOARD_HEIGHT)])
 
-    plt.figure('right iris x callibration')
-    plt.plot(np.array(range(4)) * BOARD_WIDTH / 3, np.array(result)[1:5, 1])
-    plt.plot(np.array(range(4)) * BOARD_WIDTH / 3, np.array(result)[5:9, 1])
-    plt.plot(np.array(range(4)) * BOARD_WIDTH / 3, np.array(result)[9:13, 1])
-    plt.legend(['y = 0', 'y = ' + str(BOARD_HEIGHT/2), 'y = ' + str(BOARD_HEIGHT)])
+    plt.figure()
+    plt.title('right iris x callibration')
+    for k in range(GRID[0]):
+        plt.plot(np.array(range(GRID[1])) * BOARD_WIDTH / (GRID[1] - 1), np.array(result)[(1 + k * GRID[1]):(1 + (k + 1) * GRID[1]), 1])
+    # plt.legend(['y = 0', 'y = ' + str(BOARD_HEIGHT/2), 'y = ' + str(BOARD_HEIGHT)])
 
-    plt.figure('left iris y callibration')
-    plt.plot(np.array(range(3)) * BOARD_WIDTH/2, np.array(result)[[1, 5, 9], 2])
-    plt.plot(np.array(range(3)) * BOARD_WIDTH/2, np.array(result)[[2, 6, 10], 2])
-    plt.plot(np.array(range(3)) * BOARD_WIDTH/2, np.array(result)[[3, 7, 11], 2])
-    plt.plot(np.array(range(3)) * BOARD_WIDTH/2, np.array(result)[[4, 8, 12], 2])
-    plt.legend(['x = 0', 'x = ' + str(BOARD_WIDTH/3), 'x = ' + str(BOARD_WIDTH*2/3), 'x = ' + str(BOARD_WIDTH)])
+    plt.figure()
+    plt.title('left iris y callibration')
+    for k in range(GRID[1]):
+        plt.plot(np.array(range(GRID[0])) * BOARD_HEIGHT/(GRID[0] - 1), np.array(result)[list(range((1+k), POINTS, GRID[1])), 2])
+    # plt.legend(['x = 0', 'x = ' + str(BOARD_WIDTH/3), 'x = ' + str(BOARD_WIDTH*2/3), 'x = ' + str(BOARD_WIDTH)])
 
-    plt.figure('right iris y callibration')
-    plt.plot(np.array(range(3)) * BOARD_WIDTH/2, np.array(result)[[1, 5, 9], 3])
-    plt.plot(np.array(range(3)) * BOARD_WIDTH/2, np.array(result)[[2, 6, 10], 3])
-    plt.plot(np.array(range(3)) * BOARD_WIDTH/2, np.array(result)[[3, 7, 11], 3])
-    plt.plot(np.array(range(3)) * BOARD_WIDTH/2, np.array(result)[[4, 8, 12], 3])
-    plt.legend(['x = 0', 'x = ' + str(BOARD_WIDTH/3), 'x = ' + str(BOARD_WIDTH*2/3), 'x = ' + str(BOARD_WIDTH)])
+    plt.figure()
+    plt.title('right iris y callibration')
+    for k in range(GRID[1]):
+        plt.plot(np.array(range(GRID[0])) * BOARD_HEIGHT / (GRID[0] - 1), np.array(result)[list(range((1 + k), POINTS, GRID[1])), 3])
+    # plt.legend(['x = 0', 'x = ' + str(BOARD_WIDTH/3), 'x = ' + str(BOARD_WIDTH*2/3), 'x = ' + str(BOARD_WIDTH)])
 
+    plt.show()
+
+    for p in result[:POINTS]:
+        plt.plot(p[0], p[2], 'or')
+        plt.plot(p[1], p[3], 'ob')
+    plt.plot(result[0][0], result[0][2], '^c')
+    plt.plot(result[0][1], result[0][3], '^c')
     plt.show()
 
     return result
@@ -311,9 +402,6 @@ LEFT_IRIS = range(469, 473)
 RIGHT_CENTER = 473
 LEFT_CENTER = 468
 
-L_BLINK_RATIO = 0.1
-R_BLINK_RATIO = 0.15
-
 # FILTER_NUM = [1]
 # FILTER_DEN = [1]
 
@@ -327,11 +415,14 @@ R_BLINK_RATIO = 0.15
 # FILTER_DEN = [1.0000, -2.0727, 1.5292, -0.3892]
 
 FILTER_NUM = [0.00084, 0.00336, 0.00588, 0.00672, 0.00672, 0.00672, 0.00672, 0.00672, 0.00672, 0.00672, 0.00588, 0.00336, 0.00084]
-FILTER_DEN = [1.0000, -2.0727, 1.5292, -0.3892] + [0]*9
+FILTER_DEN = [1.0000, -2.0727, 1.5292, -0.3892]
 
-FILTER_ORDER = max(len(FILTER_NUM), len(FILTER_DEN))
+right_x_filter = Filter(FILTER_NUM, FILTER_DEN)
+right_y_filter = Filter(FILTER_NUM, FILTER_DEN)
+left_x_filter = Filter(FILTER_NUM, FILTER_DEN)
+left_y_filter = Filter(FILTER_NUM, FILTER_DEN)
 
-test_filter = Filter(FILTER_NUM, FILTER_DEN)
+gc = GazeCalculator()
 
 BOARD_WIDTH = 1200
 BOARD_HEIGHT = 600
@@ -346,19 +437,30 @@ right_gaze_arr = []  # (t, x, y)
 left_gaze_arr = []
 right_blink_arr = []  # (t, x0, y0)
 left_blink_arr = []
-left_filter = []
-
-right_gaze_buffer = np.zeros((FILTER_ORDER, 2))  # (x, y)
-left_gaze_buffer = np.zeros((FILTER_ORDER, 2))
-buffer_index = 0
-
-left_gaze = [0, 0]
-right_gaze = [0, 0]
+paint_points = []
+test_arr = []
 
 IDLE = 0
 CALLIBRATION = 1
 EVALUATION = 2
+PAINT = 3
 MODE = IDLE
+
+PLOT3D = False
+
+if PLOT3D:
+    plt.ion()
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+
+# for k in range(100):
+#     ax.plot([0, sin(k/10)], [0, cos(k/10)], [0, 1])
+#     plt.xlim([-1, 1])
+#     plt.ylim([-1, 1])
+#     plt.draw()
+#     plt.pause(0.02)
+#     ax.cla()
 
 with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True, 
                             min_detection_confidence=0.5, min_tracking_confidence=0.5) as face_mesh: 
@@ -366,7 +468,18 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
     duration = time.time()
     process_duration = time.time()
     start = time.time()
-    
+
+    # plt.ion()
+    # fig = plt.figure()
+    # ax = fig.add_subplot(111, projection='3d')
+    # line1, = ax.plot([0], [0], 'bo')
+    # plt.ylim([0, 1])
+
+    # fig = plt.figure('test')
+    # ax = fig.add_subplot(111)
+    # plt.ion()
+    # my_plot, = ax.plot([0, 1], [0, 1], 'ro')
+
     while True:
         loop_start = time.time()
         ret, img = cap.read()
@@ -388,11 +501,10 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
 
             if MODE == IDLE:
                 # blink detection
-                
+
                 l_ratio, r_ratio = eyes_ratio(mesh_points)
-                right_blink = r_ratio < R_BLINK_RATIO
-                left_blink = l_ratio < L_BLINK_RATIO
-                blinked = left_blink or right_blink
+                right_blink = r_ratio < gc.R_BLINK_RATIO
+                left_blink = l_ratio < gc.L_BLINK_RATIO
                 
                 # calculate coordinates 
                 left_iris_x, right_iris_x, left_iris_y, right_iris_y = iris_positions(mesh_points)
@@ -409,50 +521,40 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
                 (nose_end_point2D, jacobian) = cv2.projectPoints(np.array([(0.0, 0.0, 25.0)]), rotation_vector, 
                                                                     translation_vector, camera_matrix, dist_coeff)
               
-                p1 = ( int(image_points[0][0]), int(image_points[0][1]))
-                p2 = ( int(nose_end_point2D[0][0][0]), int(nose_end_point2D[0][0][1]))
+                p1 = (int(image_points[0][0]), int(image_points[0][1]))
+                p2 = (int(nose_end_point2D[0][0][0]), int(nose_end_point2D[0][0][1]))
 
                 roll, pitch, yaw = get_head_orientation(rotation_vector, translation_vector)
+                head_x = int(gc.head_position(translation_vector[:2], [roll, pitch, yaw])[0] * 10 + BOARD_WIDTH/2)
+                head_gaze_x = int(translation_vector[0] * 10 + 10*translation_vector[2]*tan(yaw * pi / 180) + BOARD_WIDTH/2)
+                head_y = int(translation_vector[1] * 10 + BOARD_HEIGHT/2)
+                head_gaze_y = int(translation_vector[1] * 10 + 10*translation_vector[2]*tan(-pitch * pi / 180) + BOARD_HEIGHT/2)
                 # print((roll, pitch, yaw))
                 # print(translation_vector)
 
                 # calculate gaze
                 if left_blink:
-                    left_blink_arr += [[time.time() - start, left_gaze[0], left_gaze[1]]]
+                    left_blink_arr += [[time.time() - start, left_x_filter.output(), left_y_filter.output()]]
                 if right_blink:
-                    right_blink_arr += [[time.time() - start, right_gaze[0], right_gaze[1]]]
+                    right_blink_arr += [[time.time() - start, right_x_filter.output(), right_y_filter.output()]]
 
-                if not blinked:
+                if not is_blinked(mesh_points, gc):
                     # filter
-                    left_gaze_buffer[buffer_index] = [left_iris_x, left_iris_y]
-                    right_gaze_buffer[buffer_index] = [right_iris_x, right_iris_y]
-                    test_filter.add_input(left_iris_x)
+                    left_x_filter.add_input(left_iris_x)
+                    left_y_filter.add_input(left_iris_y)
+                    right_x_filter.add_input(right_iris_x)
+                    right_y_filter.add_input(right_iris_y)
 
+                    left_gaze_arr += [[time.time() - start, left_x_filter.output(), left_y_filter.output()]]
+                    right_gaze_arr += [[time.time() - start, right_x_filter.output(), right_y_filter.output()]]
 
-                    left_gaze = [0, 0]
-                    right_gaze = [0, 0]
-                    for i in range(FILTER_ORDER):
-                        j = (buffer_index - i) % FILTER_ORDER
-                        left_gaze[0] += FILTER_NUM[i] * left_gaze_buffer[j][0]
-                        left_gaze[1] += FILTER_NUM[i] * left_gaze_buffer[j][1]
-                        right_gaze[0] += FILTER_NUM[i] * right_gaze_buffer[j][0]
-                        right_gaze[1] += FILTER_NUM[i] * right_gaze_buffer[j][1]
-                        if len(left_gaze_arr) > i and i != FILTER_ORDER-1:
-                            left_gaze[0] -= FILTER_DEN[i+1] * left_gaze_arr[-i-1][1]
-                            left_gaze[1] -= FILTER_DEN[i+1] * left_gaze_arr[-i-1][2]
-                            right_gaze[0] -= FILTER_DEN[i+1] * right_gaze_arr[-i-1][1]
-                            right_gaze[1] -= FILTER_DEN[i+1] * right_gaze_arr[-i-1][2]
+                gaze_x, gaze_y = gc.position2gaze(left_x_filter.output(), left_y_filter.output(), right_x_filter.output(), right_y_filter.output(), True, board)
 
-                    left_gaze_arr += [[time.time() - start, left_gaze[0], left_gaze[1]]]
-                    left_filter += [[time.time() - start, test_filter.output()]]
-                    right_gaze_arr += [[time.time() - start, right_gaze[0], right_gaze[1]]]
-
-                    buffer_index = (buffer_index + 1) % FILTER_ORDER
-
-                left_gaze_x = int(-14000 * tan(asin(left_gaze[0] - 0.56)) + BOARD_WIDTH/2)
-                right_gaze_x = int(14000 * tan(asin(right_gaze[0] - 0.56)) + BOARD_WIDTH/2)
-                left_gaze_y = int(-14000 * tan(asin(left_gaze[1] - 0.31)) + BOARD_HEIGHT/2)
-                right_gaze_y = int(-14000 * tan(asin(right_gaze[1] - 0.31)) + BOARD_HEIGHT/2)
+                # data to show
+                test_arr += [[time.time() - start, length(mesh_points[LEFT_EYE[0]], mesh_points[LEFT_EYE[8]]),
+                                                    length(mesh_points[RIGHT_EYE[0]], mesh_points[RIGHT_EYE[8]]),
+                                                    length(mesh_points[RIGHT_EYE[0]], mesh_points[LEFT_EYE[0]]),
+                                                    translation_vector[2]]]
 
                 # show orientation calculations
                 # for ii in points_idx: # range(landmarks.shape[1]):
@@ -486,20 +588,24 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
                 # cv2.polylines(img, [mesh_points[RIGHT_EYE]], True, (0, 0, 255), 1)
 
                 # gaze circle
-                if left_blink:
-                    cv2.circle(board, (left_gaze_x, left_gaze_y), 12, (0, 255, 255), cv2.FILLED)
-                else:
-                    cv2.circle(board, (left_gaze_x, left_gaze_y), 10, (0, 255, 255), 2)
-                if right_blink:
-                    cv2.circle(board, (right_gaze_x, right_gaze_y), 12, (255, 255, 0), cv2.FILLED)
-                else:
-                    cv2.circle(board, (right_gaze_x, right_gaze_y), 10, (255, 255, 0), 2)
-                if blinked:
-                    cv2.circle(board, ((right_gaze_x + left_gaze_x)//2, (right_gaze_y + left_gaze_y)//2), 
-                                12, (255, 255, 255), cv2.FILLED)
-                else:
-                    cv2.circle(board, ((right_gaze_x + left_gaze_x)//2, (right_gaze_y + left_gaze_y)//2), 
-                                10, (255, 255, 255), 2)
+                # if left_blink:
+                #     cv2.circle(board, (left_gaze_x, left_gaze_y), 12, (0, 255, 255), cv2.FILLED)
+                # else:
+                #     cv2.circle(board, (left_gaze_x, left_gaze_y), 10, (0, 255, 255), 2)
+                # if right_blink:
+                #     cv2.circle(board, (right_gaze_x, right_gaze_y), 12, (255, 255, 0), cv2.FILLED)
+                # else:
+                #     cv2.circle(board, (right_gaze_x, right_gaze_y), 10, (255, 255, 0), 2)
+                # if blinked:
+                #     cv2.circle(board, ((right_gaze_x + left_gaze_x)//2, (right_gaze_y + left_gaze_y)//2),
+                #                 12, (255, 255, 255), cv2.FILLED)
+                # else:
+                #     cv2.circle(board, ((right_gaze_x + left_gaze_x)//2, (right_gaze_y + left_gaze_y)//2),
+                #                 10, (255, 255, 255), 2)
+
+                # head position cross
+                cv2cross(board, (head_x, head_y), 14, (255, 255, 255), 2)
+                cv2cross(board, (head_gaze_x, head_gaze_y), 14, (255, 0, 255), 2, pi*roll/180)
 
                 # show FPS and blink
                 fps_str = str(int(duration * 1000))
@@ -520,28 +626,66 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
                 # cv2.imshow("Top", top)
                 cv2.imshow("Board", board)
 
+                # 3d plots
+                if PLOT3D:
+                    # 3d face mesh
+                    ax.plot(mesh_points_3d[0], mesh_points_3d[2], -mesh_points_3d[1], 'ob', markersize=0.5)
+                    plt.xlim([0, 1])
+                    plt.ylim([-1, 1])
+                    ax.set_zlim([-1, 0])
+
+                    # equivalent robot
+
+                    # common
+                    plt.draw()
+                    plt.pause(0.02)
+                    ax.cla()
+
             elif MODE == CALLIBRATION:
-                callibration_return = callibration()
-                print(callibration_return)
-                for p in callibration_return:
-                    plt.plot(p[0], p[2], 'or')
-                    plt.plot(p[1], p[3], 'ob')
-                plt.plot(callibration_return[0][0], callibration_return[0][2], '^c')
-                plt.plot(callibration_return[0][1], callibration_return[0][3], '^c')
-                plt.show()
+                callibration_return = callibration(gc)
                 MODE = IDLE
                 cv2.destroyAllWindows()
+
+            elif MODE == PAINT:
+
+                # calculate coordinates
+                left_iris_x, right_iris_x, left_iris_y, right_iris_y = iris_positions(mesh_points)
+
+                if not is_blinked(mesh_points, gc):
+                    # filter
+                    left_x_filter.add_input(left_iris_x)
+                    left_y_filter.add_input(left_iris_y)
+                    right_x_filter.add_input(right_iris_x)
+                    right_y_filter.add_input(right_iris_y)
+
+                paint_points += [gc.position2gaze(left_x_filter.output(), left_y_filter.output(),
+                                                  right_x_filter.output(), right_y_filter.output())]
+
+                if len(paint_points) > 1:
+                    cv2.polylines(board, [np.array(paint_points)], False, (255, 0, 255), 2)
+
+                cv2.imshow('Board', board)
 
         
         key = cv2.waitKey(1)
         if key == 27:
             break
+        elif key == ord('i'):
+            MODE = IDLE
+            cv2.destroyAllWindows()
         elif key == ord('c'):
             MODE = CALLIBRATION
             cv2.destroyAllWindows()
         elif key == ord('e'):
             MODE = EVALUATION
             cv2.destroyAllWindows()
+        elif key == ord('p'):
+            paint_points = []
+            MODE = PAINT
+            cv2.destroyAllWindows()
+
+
+
         loop_end = time.time()
         duration = loop_end - loop_start
         process_duration = loop_end - process_start
@@ -554,31 +698,34 @@ left_gaze_arr = np.array(left_gaze_arr)
 left_blink_arr = np.array(left_blink_arr)
 right_gaze_arr = np.array(right_gaze_arr)
 right_blink_arr = np.array(right_blink_arr)
-left_filter = np.array(left_filter)
+# test_arr = np.array(test_arr)
 
 # scipy.io.savemat('test.mat', {'data': left_gaze_arr})
 
-plt.figure()
-plt.title("x")
-plt.plot(left_gaze_arr[:, 0], left_gaze_arr[:, 1])
-plt.plot(right_gaze_arr[:, 0], right_gaze_arr[:, 1])
-if left_blink_arr.size != 0:
-    plt.plot(left_blink_arr[:, 0], left_blink_arr[:, 1], 'o')
-if right_blink_arr.size != 0:
-    plt.plot(right_blink_arr[:, 0], right_blink_arr[:, 1], 'o')
-plt.legend(['left', 'right'])
-plt.figure()
-plt.title("y")
-plt.plot(left_gaze_arr[:, 0], left_gaze_arr[:, 2])
-plt.plot(right_gaze_arr[:, 0], right_gaze_arr[:, 2])
-if left_blink_arr.size != 0:
-    plt.plot(left_blink_arr[:, 0], left_blink_arr[:, 2], 'o')
-if right_blink_arr.size != 0:
-    plt.plot(right_blink_arr[:, 0], right_blink_arr[:, 2], 'o')
-plt.legend(['left', 'right'])
+# plt.figure()
+# plt.plot(test_arr[:, 0], test_arr[:, 1:])
+
+# plt.figure()
+# plt.title("x")
+# plt.plot(left_gaze_arr[:, 0], left_gaze_arr[:, 1])
+# plt.plot(right_gaze_arr[:, 0], right_gaze_arr[:, 1])
+# if left_blink_arr.size != 0:
+#     plt.plot(left_blink_arr[:, 0], left_blink_arr[:, 1], 'o')
+# if right_blink_arr.size != 0:
+#     plt.plot(right_blink_arr[:, 0], right_blink_arr[:, 1], 'o')
+# plt.legend(['left', 'right'])
+# plt.figure()
+# plt.title("y")
+# plt.plot(left_gaze_arr[:, 0], left_gaze_arr[:, 2])
+# plt.plot(right_gaze_arr[:, 0], right_gaze_arr[:, 2])
+# if left_blink_arr.size != 0:
+#     plt.plot(left_blink_arr[:, 0], left_blink_arr[:, 2], 'o')
+# if right_blink_arr.size != 0:
+#     plt.plot(right_blink_arr[:, 0], right_blink_arr[:, 2], 'o')
+# plt.legend(['left', 'right'])
 
 # plt.figure()
 # plt.title("FPS")
 # plt.plot(fps)
 
-plt.show()
+# plt.show()
