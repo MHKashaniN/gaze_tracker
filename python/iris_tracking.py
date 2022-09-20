@@ -4,7 +4,7 @@ import numpy as np
 import mediapipe as mp
 import matplotlib.pyplot as plt
 import scipy.io
-from math import hypot, inf, tan, asin, pi, sin, cos
+from math import hypot, inf, tan, atan, pi, sin, cos
 from face_geometry import get_metric_landmarks, PCF, procrustes_landmark_basis
 from mpl_toolkits.mplot3d import Axes3D
 
@@ -45,13 +45,14 @@ class Filter:
 
 class GazeCalculator:
     def __init__(self):
-        self.right_gaze_coeffs = [14000, -7240, -14000, 4640]
-        self.left_gaze_coeffs = [-14000, 8440, -14000, 4640]
+        self.right_gaze_coeffs = [11614.728433206808, -5930.995837491617, -3334.891897265645, 690.8138330408594]
+        self.left_gaze_coeffs = [-15213.10861867692, 9284.722867724182, -11821.4602721843, 853.0727963753402]
 
         self.L_BLINK_RATIO = 0.1
         self.R_BLINK_RATIO = 0.15
 
         self.position_correct = [0, 0]
+        self.position_coeffs = [1, 1, 1]
 
     def position2gaze(self, lix, liy, rix, riy, show=False, _board=None):
         # left_gaze_x = int(-14000 * tan(asin(left_x_filter.output() - 0.56)) + BOARD_WIDTH / 2)
@@ -71,10 +72,72 @@ class GazeCalculator:
 
         return int((x_l + x_r)/2), int((y_l + y_r)/2)
 
+    def head_position_correct(self, p, o):
+        return p[0] - self.position_correct[0] * tan(pi * o[2] / 180) / p[2] , \
+               p[1] - self.position_correct[1] * tan(pi * o[1] / 180) / p[2], p[2]
+
     def head_position(self, p, o):
-        return p[0] - self.position_correct[0] * o[2], p[1] - self.position_correct[1] * o[1]
+        p = self.head_position_correct(p, o)
+        return p[0] * self.position_coeffs[0],\
+               p[1] * self.position_coeffs[1],\
+               p[2] * self.position_coeffs[2]
 
+    def head_orientation(self, p, o):
+        return o[0] / pi, o[1] + 180 * atan(p[1]/p[2]) / pi, o[2] - 180 * atan(p[0]/p[2]) / pi
 
+class HeadCoordinates:
+    def __init__(self, _frame_width, _frame_height):
+        # pseudo camera internals
+        self.frame_width = _frame_width
+        self.frame_height = _frame_height
+        focal_length = _frame_width
+        center = (_frame_width / 2, _frame_height / 2)
+        self.camera_matrix = np.array(
+            [[focal_length, 0, center[0]],
+             [0, focal_length, center[1]],
+             [0, 0, 1]], dtype="double")
+        self.pcf = PCF(near=1, far=10000, frame_height=_frame_height, frame_width=_frame_width, fy=self.camera_matrix[1, 1])
+        self.dist_coeff = np.zeros((4, 1))
+
+    def get_head_orientation(self, rvec, tvec):
+        rmat = cv2.Rodrigues(rvec)[0]
+        P = np.hstack((rmat, tvec))  # projection matrix
+
+        # find euler angles
+        euler_angles = cv2.decomposeProjectionMatrix(P)[6]
+        _pitch = -euler_angles.item(0)
+        _yaw = -euler_angles.item(1)
+        _roll = euler_angles.item(2)
+
+        # Ajust coordinate ranges
+        if _pitch < 0:
+            _pitch = 180 + _pitch
+        else:
+            _pitch = _pitch - 180
+
+        t = '{y},{p},{r}'.format(y=round(_yaw),
+                                 p=round(_pitch),
+                                 r=round(_roll))
+        # return round(_roll), round(_pitch), round(_yaw)
+        return _roll, _pitch, _yaw
+
+    def head_coordinates(self, _mesh_points_3d):
+        metric_landmarks, pose_transform_mat = get_metric_landmarks(_mesh_points_3d.copy(), self.pcf)
+        model_points = metric_landmarks[0:3, points_idx].T
+        image_points = _mesh_points_3d[0:2, points_idx].T * np.array([self.frame_width, self.frame_height])[None, :]
+
+        success, rotation_vector, _translation_vector = cv2.solvePnP(model_points, image_points, self.camera_matrix,
+                                                                     self.dist_coeff, flags=cv2.SOLVEPNP_ITERATIVE)
+
+        (nose_end_point2D, jacobian) = cv2.projectPoints(np.array([(0.0, 0.0, 25.0)]), rotation_vector,
+                                                         _translation_vector, self.camera_matrix, self.dist_coeff)
+
+        p1 = (int(image_points[0][0]), int(image_points[0][1]))
+        p2 = (int(nose_end_point2D[0][0][0]), int(nose_end_point2D[0][0][1]))
+
+        _roll, _pitch, _yaw = self.get_head_orientation(rotation_vector, _translation_vector)
+
+        return _roll, _pitch, _yaw, _translation_vector
 
 
 def length(p1, p2):
@@ -112,29 +175,6 @@ def cv2cross(_img, center, radius, color, thikness, angle=0.0):
                     (int(center[0] + radius * cos(5*pi/4 + angle)), int(center[1] + radius * sin(5*pi/4 + angle))), color, thikness)
 
 
-def get_head_orientation(rvec, tvec):
-    rmat = cv2.Rodrigues(rvec)[0]  
-    P = np.hstack((rmat, tvec))  # projection matrix
-    
-    # find euler angles 
-    euler_angles = cv2.decomposeProjectionMatrix(P)[6]
-    pitch = -euler_angles.item(0) 
-    yaw = -euler_angles.item(1) 
-    roll = euler_angles.item(2) 
-
-    # Ajust coordinate ranges
-    if pitch < 0:
-      pitch = 180 + pitch
-    else:
-      pitch = pitch - 180
-
-    t = '{y},{p},{r}'.format(y=round(yaw),
-                             p=round(pitch),
-                             r=round(roll)) 
-    # return round(roll), round(pitch), round(yaw)
-    return roll, pitch, yaw
-
-
 def eyes_ratio(_mesh_points):
     l_h = length(_mesh_points[LEFT_EYE[0]], _mesh_points[LEFT_EYE[8]])
     r_h = length(_mesh_points[RIGHT_EYE[0]], _mesh_points[RIGHT_EYE[8]])
@@ -149,13 +189,13 @@ def iris_positions(_mesh_points):
     # calculate x coordinates based on eye horizontal line
     # left_iris_center = _mesh_points[LEFT_CENTER]
     # right_iris_center = _mesh_points[RIGHT_CENTER]
-
+    #
     # left_projected_center = project(_mesh_points[LEFT_EYE[0]], left_iris_center, _mesh_points[LEFT_EYE[8]])
     # right_projected_center = project(_mesh_points[RIGHT_EYE[0]], right_iris_center, _mesh_points[RIGHT_EYE[8]])
-
+    #
     # l_h = length(_mesh_points[LEFT_EYE[0]], _mesh_points[LEFT_EYE[8]])
     # r_h = length(_mesh_points[RIGHT_EYE[0]], _mesh_points[RIGHT_EYE[8]])
-
+    #
     # left_iris_x = length(left_projected_center, _mesh_points[LEFT_EYE[0]]) / l_h
     # right_iris_x = length(right_projected_center, _mesh_points[RIGHT_EYE[0]]) / r_h
 
@@ -180,8 +220,8 @@ def iris_positions(_mesh_points):
     # right_iris_y = r_ratio
 
     # calculate y coordinates based on head horizontal line
-    left_iris_y = signed_dist(_mesh_points[RIGHT_EYE[0]], left_iris_center, _mesh_points[LEFT_EYE[0]]) / l_h
-    right_iris_y = signed_dist(_mesh_points[RIGHT_EYE[0]], right_iris_center, _mesh_points[LEFT_EYE[0]]) / r_h
+    left_iris_y = signed_dist(_mesh_points[RIGHT_EYE[0]], _mesh_points[LEFT_EYE[0]], left_iris_center) / l_h
+    right_iris_y = signed_dist(_mesh_points[RIGHT_EYE[0]], _mesh_points[LEFT_EYE[0]], right_iris_center) / r_h
 
 
     # show axis and coordinates based on eye horizontal line
@@ -220,7 +260,8 @@ def is_blinked(_mesh_points, _gc):
     left_blink = l_ratio < _gc.L_BLINK_RATIO
     return left_blink or right_blink
 
-def get_mean_position(points_num):
+
+def get_mean_position(points_num, _hc, show_board = False, board_background = None):
     data = []
     t = []
     _FILTER_NUM = [0.1] * 10
@@ -236,48 +277,37 @@ def get_mean_position(points_num):
         img = cv2.flip(img, 1)
         rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = face_mesh.process(rgb_img)
+        if show_board:
+            _board = board_background.copy()
 
         if results.multi_face_landmarks:
             mesh_points = np.array([[int(p.x * img_w), int(p.y * img_h)] for p in results.multi_face_landmarks[0].landmark])
             mesh_points_3d = np.array([(p.x, p.y, p.z) for p in results.multi_face_landmarks[0].landmark])[:468].T
 
             left_iris_x, right_iris_x, left_iris_y, right_iris_y = iris_positions(mesh_points)
+            _roll, _pitch, _yaw, _tvect = _hc.head_coordinates(mesh_points_3d)
             lix_filter.add_input(left_iris_x)
             liy_filter.add_input(left_iris_y)
             rix_filter.add_input(right_iris_x)
             riy_filter.add_input(right_iris_y)
             l_ratio, r_ratio = eyes_ratio(mesh_points)
-            data += [[lix_filter.output(), rix_filter.output(), liy_filter.output(), riy_filter.output(), l_ratio, r_ratio]]
-            t += [lix_filter.output()]
+            _tvect = list(np.reshape(_tvect, -1))
+            data += [[lix_filter.output(), rix_filter.output(), liy_filter.output(), riy_filter.output(),
+                      l_ratio, r_ratio, _roll, _pitch, _yaw] + _tvect]
+            t += [_tvect[0]]
+            if show_board:
+                cv2cross(_board, (10*_tvect[0] + BOARD_WIDTH // 2, 10*_tvect[1] + BOARD_HEIGHT // 2), 10, (255, 255, 255), 2)
+                cv2cross(_board, (int(10*_tvect[0] + BOARD_WIDTH / 2 + 10*_tvect[2]*tan(pi*_yaw/180)),
+                                  int(10*_tvect[1] + BOARD_HEIGHT / 2 - 10*_tvect[2]*tan(pi*_pitch/180))), 10, (255, 0, 255), 2)
+                cv2.imshow("Board", _board)
 
         if cv2.waitKey(1) == 32:
             data = np.array(data)
             return t, np.mean(data[-points_num:, :], 0)
 
-def get_mean_ratio(points_num):
-    data = []
-    t = []
-    while True:
-        ret, img = cap.read()
-        img_h, img_w = img.shape[:2]
-        img = cv2.flip(img, 1)
-        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results = face_mesh.process(rgb_img)
 
-        if results.multi_face_landmarks:
-            mesh_points = np.array([[int(p.x * img_w), int(p.y * img_h)] for p in results.multi_face_landmarks[0].landmark])
-            mesh_points_3d = np.array([(p.x, p.y, p.z) for p in results.multi_face_landmarks[0].landmark])[:468].T
-
-
-            l_ratio, r_ratio = eyes_ratio(mesh_points)
-            data += [4*[0] + [l_ratio, r_ratio]]
-            t += [l_ratio]
-
-        if cv2.waitKey(1) == 32:
-            data = np.array(data)
-            return t, np.mean(data[-points_num:, :], 0)
-
-def callibration(_gc):
+def callibration(_gc, _hc):
+    # position correct
     t = []
     t_stops = []
     POINTS_NUM = 20
@@ -287,9 +317,50 @@ def callibration(_gc):
     cv2.imshow("Board", cal_board)
     cv2.waitKey(0)
 
+    cv2cross(cal_board, (BOARD_WIDTH // 2, BOARD_HEIGHT // 2), 10, (0, 255, 255), 2)
+    cv2.imshow("Board", cal_board)
+    returned_t, returned_result = get_mean_position(POINTS_NUM, _hc, True, cal_board)
+    t += returned_t
+    t_stops += [len(t) - 1]
+    result += [returned_result]
+
+    cal_board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 3), np.uint8)
+    cv2cross(cal_board, (BOARD_WIDTH // 2, BOARD_HEIGHT // 2), 10, (0, 255, 255), 2)
+    cv2cross(cal_board, (int(BOARD_WIDTH / 2 + 10 * result[0][11] * tan(pi * 30 / 180)),
+                      int(BOARD_HEIGHT / 2)), 10, (0, 255, 255), 2)
+    cv2.imshow("Board", cal_board)
+    returned_t, returned_result = get_mean_position(POINTS_NUM, _hc, True, cal_board)
+    t += returned_t
+    t_stops += [len(t) - 1]
+    result += [returned_result]
+
+    _gc.position_correct[0] = ((result[0][11] + result[1][11]) * result[1][9] /2) / tan(pi*30/180)
+
+    cal_board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 3), np.uint8)
+    cv2cross(cal_board, (BOARD_WIDTH // 2, BOARD_HEIGHT // 2), 10, (0, 255, 255), 2)
+    cv2cross(cal_board, (int(BOARD_WIDTH / 2),
+                         int(BOARD_HEIGHT / 2 + 10 * result[0][11] * tan(pi * 30 / 180))), 10, (0, 255, 255), 2)
+    cv2.imshow("Board", cal_board)
+    returned_t, returned_result = get_mean_position(POINTS_NUM, _hc, True, cal_board)
+    t += returned_t
+    t_stops += [len(t) - 1]
+    result += [returned_result]
+
+    _gc.position_correct[1] = -((result[0][11] + result[1][11]) * result[2][10] / 2) / tan(pi * 30 / 180)
+
+    print('Calibration results:')
+    print('position_correct = ', end='')
+    print(_gc.position_correct)
+
+    # gaze
+    result = []
+    t = []
+    t_stops = []
+
+    cal_board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 3), np.uint8)
     cv2.circle(cal_board, (BOARD_WIDTH // 2, BOARD_HEIGHT // 2), 15, (255, 0, 255), cv2.FILLED)
     cv2.imshow("Board", cal_board)
-    returned_t, returned_result = get_mean_position(POINTS_NUM)
+    returned_t, returned_result = get_mean_position(POINTS_NUM, _hc)
     t += returned_t
     t_stops += [len(t) - 1]
     result += [returned_result]
@@ -299,7 +370,7 @@ def callibration(_gc):
             cal_board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 3), np.uint8)
             cv2.circle(cal_board, (int(i * BOARD_WIDTH / (GRID[1] - 1)), int(j * BOARD_HEIGHT / (GRID[0] - 1))), 15, (255, 0, 255), cv2.FILLED)
             cv2.imshow("Board", cal_board)
-            returned_t, returned_result = get_mean_position(POINTS_NUM)
+            returned_t, returned_result = get_mean_position(POINTS_NUM, _hc)
             t += returned_t
             t_stops += [len(t) - 1]
             result += [returned_result]
@@ -307,7 +378,7 @@ def callibration(_gc):
     cal_board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 3), np.uint8)
     cv2.putText(cal_board, 'Close Your Eyes and press space', (0, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
     cv2.imshow("Board", cal_board)
-    returned_t, returned_result = get_mean_ratio(POINTS_NUM)
+    returned_t, returned_result = get_mean_position(POINTS_NUM, _hc)
     result += [returned_result]
 
     POINTS = GRID[0]*GRID[1] + 1
@@ -329,40 +400,41 @@ def callibration(_gc):
     _gc.left_gaze_coeffs = [coeffs_lx[1], coeffs_lx[0], coeffs_ly[1], coeffs_ly[0]]
     _gc.right_gaze_coeffs = [coeffs_rx[1], coeffs_rx[0], coeffs_ry[1], coeffs_ry[0]]
 
-    plt.figure()
-    plt.title('X')
-    plt.plot(t, 'b')
-    plt.plot(t_stops, np.array(t)[t_stops], 'kx')
-    for k in range(POINTS):
-        plt.plot(range((t_stops[k] - POINTS_NUM + 1), t_stops[k] + 1), [result[k][0]] * POINTS_NUM, 'r')
-    plt.show()
+    print('left eye coeffs = ', end='')
+    print(_gc.left_gaze_coeffs)
+    print('right eye coeffs = ', end='')
+    print(_gc.right_gaze_coeffs)
+
+    # plt.figure()
+    # plt.title('X')
+    # plt.plot(t, 'b')
+    # plt.plot(t_stops, np.array(t)[t_stops], 'kx')
+    # for k in range(POINTS):
+    #     plt.plot(range((t_stops[k] - POINTS_NUM + 1), t_stops[k] + 1), [result[k][9]] * POINTS_NUM, 'r')
+    # plt.show()
 
     plt.figure()
+    plt.subplot(2, 2, 1)
     plt.title('left iris x callibration')
     for k in range(GRID[0]):
         plt.plot(np.array(range(GRID[1])) * BOARD_WIDTH / (GRID[1] - 1), np.array(result)[(1 + k * GRID[1]):(1 + (k+1)*GRID[1]), 0])
-    # plt.legend(['y = 0', 'y = ' + str(BOARD_HEIGHT/2), 'y = ' + str(BOARD_HEIGHT)])
 
-    plt.figure()
+    plt.subplot(2, 2, 2)
     plt.title('right iris x callibration')
     for k in range(GRID[0]):
         plt.plot(np.array(range(GRID[1])) * BOARD_WIDTH / (GRID[1] - 1), np.array(result)[(1 + k * GRID[1]):(1 + (k + 1) * GRID[1]), 1])
-    # plt.legend(['y = 0', 'y = ' + str(BOARD_HEIGHT/2), 'y = ' + str(BOARD_HEIGHT)])
 
-    plt.figure()
+    plt.subplot(2, 2, 3)
     plt.title('left iris y callibration')
     for k in range(GRID[1]):
         plt.plot(np.array(range(GRID[0])) * BOARD_HEIGHT/(GRID[0] - 1), np.array(result)[list(range((1+k), POINTS, GRID[1])), 2])
-    # plt.legend(['x = 0', 'x = ' + str(BOARD_WIDTH/3), 'x = ' + str(BOARD_WIDTH*2/3), 'x = ' + str(BOARD_WIDTH)])
 
-    plt.figure()
+    plt.subplot(2, 2, 4)
     plt.title('right iris y callibration')
     for k in range(GRID[1]):
         plt.plot(np.array(range(GRID[0])) * BOARD_HEIGHT / (GRID[0] - 1), np.array(result)[list(range((1 + k), POINTS, GRID[1])), 3])
-    # plt.legend(['x = 0', 'x = ' + str(BOARD_WIDTH/3), 'x = ' + str(BOARD_WIDTH*2/3), 'x = ' + str(BOARD_WIDTH)])
 
-    plt.show()
-
+    plt.figure()
     for p in result[:POINTS]:
         plt.plot(p[0], p[2], 'or')
         plt.plot(p[1], p[3], 'ob')
@@ -371,6 +443,97 @@ def callibration(_gc):
     plt.show()
 
     return result
+
+def get_mean_gaze(points_num, _hc, _gc):
+    data = []
+    t = []
+    _FILTER_NUM = [0.1] * 10
+    _FILTER_DEN = [1]
+    lix_filter = Filter(_FILTER_NUM, _FILTER_DEN)
+    liy_filter = Filter(_FILTER_NUM, _FILTER_DEN)
+    rix_filter = Filter(_FILTER_NUM, _FILTER_DEN)
+    riy_filter = Filter(_FILTER_NUM, _FILTER_DEN)
+
+    while True:
+        ret, img = cap.read()
+        img_h, img_w = img.shape[:2]
+        img = cv2.flip(img, 1)
+        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb_img)
+
+        if results.multi_face_landmarks:
+            mesh_points = np.array([[int(p.x * img_w), int(p.y * img_h)] for p in results.multi_face_landmarks[0].landmark])
+            mesh_points_3d = np.array([(p.x, p.y, p.z) for p in results.multi_face_landmarks[0].landmark])[:468].T
+
+            left_iris_x, right_iris_x, left_iris_y, right_iris_y = iris_positions(mesh_points)
+            _roll, _pitch, _yaw, _tvect = _hc.head_coordinates(mesh_points_3d)
+            lix_filter.add_input(left_iris_x)
+            liy_filter.add_input(left_iris_y)
+            rix_filter.add_input(right_iris_x)
+            riy_filter.add_input(right_iris_y)
+            _tvect = list(np.reshape(_tvect, -1))
+            data += [_gc.position2gaze(lix_filter.output(), liy_filter.output(), rix_filter.output(), riy_filter.output())
+]
+            t += [_tvect[0]]
+
+        if cv2.waitKey(1) == 32:
+            data = np.array(data)
+            return t, np.mean(data[-points_num:, :], 0)
+
+def evaluation(_gc, _hc):
+    t = []
+    t_stops = []
+    POINTS_NUM = 20
+    GRID = [3, 4]
+    result = []
+    cal_board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 3), np.uint8)
+    cv2.imshow("Board", cal_board)
+    cv2.waitKey(0)
+
+    cal_board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 3), np.uint8)
+    cv2.circle(cal_board, (BOARD_WIDTH // 2, BOARD_HEIGHT // 2), 15, (255, 0, 255), cv2.FILLED)
+    cv2.imshow("Board", cal_board)
+    returned_t, returned_result = get_mean_gaze(POINTS_NUM, _hc, _gc)
+    t += returned_t
+    t_stops += [len(t) - 1]
+    result += [returned_result]
+
+    for j in range(GRID[0]):
+        for i in range(GRID[1]):
+            cal_board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 3), np.uint8)
+            cv2.circle(cal_board, (int(i * BOARD_WIDTH / (GRID[1] - 1)), int(j * BOARD_HEIGHT / (GRID[0] - 1))), 15, (255, 0, 255), cv2.FILLED)
+            cv2.imshow("Board", cal_board)
+            returned_t, returned_result = get_mean_gaze(POINTS_NUM, _hc, _gc)
+            t += returned_t
+            t_stops += [len(t) - 1]
+            result += [returned_result]
+
+    POINTS = GRID[0]*GRID[1] + 1
+
+    points = [[BOARD_WIDTH // 2, BOARD_HEIGHT // 2]]
+    for i in range(GRID[0]):
+        for j in range(GRID[1]):
+            points += [[j * BOARD_WIDTH // (GRID[1] - 1), i * BOARD_HEIGHT // (GRID[0] - 1)]]
+    for p in range(POINTS):
+        plt.plot([points[p][0], result[p][0]], [points[p][1], result[p][1]], 'k')
+        plt.plot(points[p][0], points[p][1], 'ob')
+        plt.plot(result[p][0], result[p][1], 'or')
+    plt.xlabel('x')
+    plt.ylabel('y')
+
+    _fig = plt.figure()
+    _ax = _fig.gca(projection='3d')
+    X = np.reshape(np.array(points)[1:, 0], (GRID[0], GRID[1]))
+    _X = np.reshape(np.array(result)[1:, 0], (GRID[0], GRID[1]))
+    Y = np.reshape(np.array(points)[1:, 1], (GRID[0], GRID[1]))
+    _Y = np.reshape(np.array(result)[1:, 1], (GRID[0], GRID[1]))
+    Z = np.sqrt((X - _X)**2 + (Y - _Y)**2)
+    _ax.plot_surface(X, Y, Z)
+    plt.xlabel('x')
+    plt.ylabel('y')
+    _ax.set_zlabel('error (px)')
+
+    plt.show()
 
 cap = cv2.VideoCapture(0) #'eye_movement_test.mp4')
 # cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -381,17 +544,11 @@ frame_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
 frame_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
 print('resolution: ', end='')
 print((frame_width, frame_height))
-# pseudo camera internals
-focal_length = frame_width
-center = (frame_width/2, frame_height/2)
-camera_matrix = np.array(
-                        [[focal_length, 0, center[0]],
-                        [0, focal_length, center[1]],
-                        [0, 0, 1]], dtype = "double")
-pcf = PCF(near=1,far=10000,frame_height=frame_height,frame_width=frame_width,fy=camera_matrix[1,1])
-dist_coeff = np.zeros((4, 1))
+hc = HeadCoordinates(frame_width, frame_height)
 
 mp_face_mesh = mp.solutions.face_mesh
+
+px_per_cm = 44.44
 
 RIGHT_EYE = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
 LEFT_EYE = [133, 155, 154, 153, 145, 144, 163, 7, 33, 246, 161, 160, 159, 158, 157, 173]
@@ -482,9 +639,12 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
 
     while True:
         loop_start = time.time()
+        # img = cv2.imread('pic1.jpg')
+        # img = cv2.resize(img, (0, 0), fx = 0.4, fy=0.4)
         ret, img = cap.read()
         if not ret:
             break
+        # img = cv2.resize(img, (0, 0), fx=0.5, fy=0.5)
         process_start = time.time()
         img_h, img_w = img.shape[:2]
         # img = cv2.flip(img, 0)
@@ -510,25 +670,17 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
                 left_iris_x, right_iris_x, left_iris_y, right_iris_y = iris_positions(mesh_points)
 
                 # calculate head orientations
-                metric_landmarks, pose_transform_mat = get_metric_landmarks(mesh_points_3d.copy(), pcf)
-                model_points = metric_landmarks[0:3, points_idx].T
-                image_points = mesh_points_3d[0:2, points_idx].T * np.array([frame_width, frame_height])[None,:]
+                roll, pitch, yaw, translation_vector = hc.head_coordinates(mesh_points_3d)
+                head_x_raw = int(translation_vector[0] * px_per_cm + BOARD_WIDTH / 2)
+                head_gaze_x_raw = int(translation_vector[0] * px_per_cm + px_per_cm * translation_vector[2] * tan(yaw * pi / 180) + BOARD_WIDTH / 2)
+                head_y_raw = int(translation_vector[1] * px_per_cm + BOARD_HEIGHT / 2)
+                head_gaze_y_raw = int(translation_vector[1] * px_per_cm + px_per_cm * translation_vector[2] * tan(-pitch * pi / 180) + BOARD_HEIGHT / 2)
 
-                success, rotation_vector, translation_vector = cv2.solvePnP(model_points, image_points, camera_matrix, 
-                                                                            dist_coeff, flags=cv2.SOLVEPNP_ITERATIVE)
-
-
-                (nose_end_point2D, jacobian) = cv2.projectPoints(np.array([(0.0, 0.0, 25.0)]), rotation_vector, 
-                                                                    translation_vector, camera_matrix, dist_coeff)
-              
-                p1 = (int(image_points[0][0]), int(image_points[0][1]))
-                p2 = (int(nose_end_point2D[0][0][0]), int(nose_end_point2D[0][0][1]))
-
-                roll, pitch, yaw = get_head_orientation(rotation_vector, translation_vector)
-                head_x = int(gc.head_position(translation_vector[:2], [roll, pitch, yaw])[0] * 10 + BOARD_WIDTH/2)
-                head_gaze_x = int(translation_vector[0] * 10 + 10*translation_vector[2]*tan(yaw * pi / 180) + BOARD_WIDTH/2)
-                head_y = int(translation_vector[1] * 10 + BOARD_HEIGHT/2)
-                head_gaze_y = int(translation_vector[1] * 10 + 10*translation_vector[2]*tan(-pitch * pi / 180) + BOARD_HEIGHT/2)
+                corrected_tvect = gc.head_position(translation_vector, [roll, pitch, yaw])
+                head_x = corrected_tvect[0] * px_per_cm + BOARD_WIDTH/2
+                head_y = corrected_tvect[1] * px_per_cm + BOARD_HEIGHT/2
+                head_gaze_x = int(head_x + px_per_cm * translation_vector[2] * tan(gc.head_orientation(corrected_tvect, [roll, pitch, yaw])[2] * pi / 180))
+                head_gaze_y = int(head_y + px_per_cm*translation_vector[2]*tan(-gc.head_orientation(corrected_tvect, [roll, pitch, yaw])[1] * pi / 180))
                 # print((roll, pitch, yaw))
                 # print(translation_vector)
 
@@ -567,7 +719,7 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
 
                 # show landmarks
                 # for p in mesh_points:
-                #     cv2.circle(img, p, 1, (255, 0, 255), cv2.FILLED) 
+                #     cv2.circle(img, p, 1, (255, 0, 255), cv2.FILLED)
                 # for p in mesh_points_3d.T:
                 #     cv2.circle(top, (int(p[0] * img_w), int(p[2] * img_h + img_h/2)), 1, (255, 0, 255), cv2.FILLED) 
 
@@ -604,7 +756,9 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
                 #                 10, (255, 255, 255), 2)
 
                 # head position cross
-                cv2cross(board, (head_x, head_y), 14, (255, 255, 255), 2)
+                cv2cross(board, (int(head_x_raw), int(head_y_raw)), 10, (255, 255, 255), 2)
+                cv2cross(board, (int(head_x), int(head_y)), 14, (255, 255, 255), 2)
+                cv2cross(board, (head_gaze_x_raw, head_gaze_y_raw), 10, (255, 0, 255), 2, pi*roll/180)
                 cv2cross(board, (head_gaze_x, head_gaze_y), 14, (255, 0, 255), 2, pi*roll/180)
 
                 # show FPS and blink
@@ -642,7 +796,7 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
                     ax.cla()
 
             elif MODE == CALLIBRATION:
-                callibration_return = callibration(gc)
+                callibration_return = callibration(gc, hc)
                 MODE = IDLE
                 cv2.destroyAllWindows()
 
@@ -665,6 +819,10 @@ with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
                     cv2.polylines(board, [np.array(paint_points)], False, (255, 0, 255), 2)
 
                 cv2.imshow('Board', board)
+
+            elif MODE == EVALUATION:
+                evaluation(gc, hc)
+                MODE = IDLE
 
         
         key = cv2.waitKey(1)
@@ -700,14 +858,18 @@ right_gaze_arr = np.array(right_gaze_arr)
 right_blink_arr = np.array(right_blink_arr)
 # test_arr = np.array(test_arr)
 
-# scipy.io.savemat('test.mat', {'data': left_gaze_arr})
+# scipy.io.savemat('lg640x480.mat', {'data': left_gaze_arr})
 
 # plt.figure()
 # plt.plot(test_arr[:, 0], test_arr[:, 1:])
 
 # plt.figure()
-# plt.title("x")
+# plt.subplot(2, 1, 1)
+# plt.title("left eye x")
 # plt.plot(left_gaze_arr[:, 0], left_gaze_arr[:, 1])
+# plt.subplot(2, 1, 2)
+# plt.title("right eye x")
+# plt.xlabel('t (s)')
 # plt.plot(right_gaze_arr[:, 0], right_gaze_arr[:, 1])
 # if left_blink_arr.size != 0:
 #     plt.plot(left_blink_arr[:, 0], left_blink_arr[:, 1], 'o')
@@ -715,8 +877,11 @@ right_blink_arr = np.array(right_blink_arr)
 #     plt.plot(right_blink_arr[:, 0], right_blink_arr[:, 1], 'o')
 # plt.legend(['left', 'right'])
 # plt.figure()
-# plt.title("y")
+# plt.subplot(2, 1, 1)
+# plt.title("left eye y")
 # plt.plot(left_gaze_arr[:, 0], left_gaze_arr[:, 2])
+# plt.subplot(2, 1, 2)
+# plt.title("right eye y")
 # plt.plot(right_gaze_arr[:, 0], right_gaze_arr[:, 2])
 # if left_blink_arr.size != 0:
 #     plt.plot(left_blink_arr[:, 0], left_blink_arr[:, 2], 'o')
